@@ -1,146 +1,120 @@
+tmuxSession: s1
 blocks:
-- text: |
+- command: |
     clusterNodes=(0 1)
     memory=8g
     cpu=4
-  blockDelay: 1300
+  header: |
+    #Set cluster count, memory and cpu
+  blockDelay: 2000
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
-  header: |
-    clear
-    #Set cluster count, memory and cpu
-
-- text: |
+  clear: true
+- command: |
     deployerLocation=~/deployer.yaml
     for cluster in ${clusterNodes}; do
       sed "/metadata:/{n;s/name: contrail-k8s-kubemanager/name: c${cluster}/;}" ${deployerLocation} > deployer_c${cluster}.yaml
       sed -i "s/autonomousSystem: 64512/autonomousSystem: 6451${cluster}/g" deployer_c${cluster}.yaml
       minikube start -p c${cluster} --driver hyperkit --cni ~/deployer_c${cluster}.yaml --container-runtime crio --memory ${memory} --cpus ${cpu} &
     done
-  blockDelay: 6000
-  charDelay: 10
-  lineDelay: 1000
-  headerDelay: 1200
-  footerDelay: 1200
   header: |
-    clear
     #Run minikube and contrail
-
-  footer: |
-    
-    
   waitCondition:
     commands:
     - minikube -p c0 status
     - minikube -p c1 status
     delay: 3
-- text: |
+  blockDelay: 6000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  footerDelay: 1200
+  clear: true
+- command: |
     for cluster in ${clusterNodes}; do
       kubectl config use-context c${cluster}
       until kubectl -n contrail get pod contrail-control-0; do sleep 5; done
      done
-  blockDelay: 1300
-  charDelay: 50
-  lineDelay: 1000
-  headerDelay: 1200
   header: |
-    clear
     #Wait for control node to be up
-
-  footer: |
-    
-    
   waitCondition:
     commands:
     - kubectl -n contrail get pods contrail-control-0 --context c0
     - kubectl -n contrail get pods contrail-control-0 --context c1
     delay: 3
-- text: contrail_federate create
+  clear: true
   blockDelay: 1300
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
+- command: contrail_federate create
   header: |
     clear
     #Federate controlplane
-    
-  footer: |
-    
-    
   waitCondition:
     commands:
     - kubectl -n contrail get bgprouter c1 --context c0
     - kubectl -n contrail get bgprouter c0 --context c0
     delay: 3
-- text: |
-    kubectl config use-context c0
-    helm repo add kubefed-charts https://raw.githubusercontent.com/kubernetes-sigs/kubefed/master/charts
-    ver=$(helm search repo kubefed -ojson | jq ".[0].version" |tr -d "\"")
-    helm --namespace kube-federation-system upgrade -i kubefed kubefed-charts/kubefed --version=${ver} --create-namespace
+  clear: true
   blockDelay: 1300
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
+- command: |
+    kubectl config use-context c0
+    helm repo add kubefed-charts https://raw.githubusercontent.com/kubernetes-sigs/kubefed/master/charts
+    ver=$(helm search repo kubefed -ojson | jq ".[0].version" |tr -d "\"")
+    helm --namespace kube-federation-system upgrade -i kubefed kubefed-charts/kubefed --version=${ver} --create-namespace
   header: |
     clear
     #Add kubefed helm charts
-
-  footer: |
-    
-    
   waitCondition:
     commands:
-    - kubectl -n kube-federation-system get deployment kubefed-admission-webhook -ojson --context c0 | jq ".status.availableReplicas" | grep 1
-    - kubectl -n kube-federation-system get deployment kubefed-controller-manager -ojson --context c0 | jq ".status.availableReplicas" | grep 2
+    - kubectl -n kube-federation-system get deployment kubefed-admission-webhook -ojson --context c0 | jq '.status.availableReplicas' | grep 1
+    - kubectl -n kube-federation-system get deployment kubefed-controller-manager -ojson --context c0 | jq '.status.availableReplicas' | grep 2
     delay: 3
-- text: |
+  clear: true
+  blockDelay: 10000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+- command: |
     for cluster in ${clusterNodes}; do
       kubefedctl join c${cluster} --cluster-context c${cluster} \
       --host-cluster-context c${clusterNodes[@]:0:1} --v=2
     done
+  header: |
+    #Create federation
+  clear: true
   blockDelay: 3000
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
-  header: |
-    clear
-    #Create federation
-
-  footer: |
-    
-    
-- text: |
+- command: |
     kubefedctl enable virtualnetworks
     kubefedctl enable subnets
     kubefedctl enable pod
+  header: |
+    #Enable federation of resources
+  clear: true
   blockDelay: 3000
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
-  header: |
-    clear
-    #Enable federation of resources
-
-  footer: |
-    
-    
-- text: |
+- command: |
     kubectl create namespace fed
     kubefedctl federate namespace fed
+  header: |
+    #Create and federate fed namespace
+  clear: true
   blockDelay: 3000
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
-  header: |
-    clear
-    #Create and federate fed namespace
-
-  footer: |
-    
-
-- text: |
-    rue > subnet_ranges.yaml
+- command: |
+    true > subnet_ranges.yaml
     for cluster in ${clusterNodes}; do
       cat << EOF >> subnet_ranges.yaml
       - ipRanges:
@@ -181,23 +155,19 @@ blocks:
     kubectl apply -f subnet_vn.yaml
     kubefedctl federate --namespace fed subnet subnet-fed
     kubefedctl federate --namespace fed virtualnetwork vn-fed
-  blockDelay: 3000
-  charDelay: 50
-  lineDelay: 1000
-  headerDelay: 1200
   header: |
-    clear
     #Create and federated subnet and virtualNetwork
-
-  footer: |
-    
-
   waitCondition:
     commands:
     - kubectl -n fed get virtualnetwork vn-fed --context c0
     - kubectl -n fed get virtualnetwork vn-fed --context c1
     delay: 3
-- text: |
+  clear: true
+  blockDelay: 10000
+  charDelay: 5
+  lineDelay: 1000
+  headerDelay: 1200
+- command: |
     true > pod_overrides.yaml
     for cluster in ${clusterNodes}; do
       cat << EOF >> pod_overrides.yaml
@@ -245,14 +215,48 @@ blocks:
     EOF
     
     kubectl apply -f fed_pod.yaml
-  blockDelay: 3000
+  header: |
+    #Create federated pod
+  clear: true
+  blockDelay: 10000
+  charDelay: 5
+  lineDelay: 1000
+  headerDelay: 1200
+- command: |
+    for cluster in ${clusterNodes}; do
+      until kubectl -n fed --context c${cluster} get pod pod1 -ojson | jq '.status.phase' |grep Running; do sleep 5; done
+    done
+  header: |
+    #Wait for pods to be up
+  waitCondition:
+    commands:
+    - kubectl -n fed --context c0 get pods pod1 -ojson | jq '.status.phase' |grep Running
+    - kubectl -n fed --context c1 get pods pod1 -ojson | jq '.status.phase' |grep Running
+    delay: 3
+  clear: true
+  blockDelay: 1300
   charDelay: 50
   lineDelay: 1000
   headerDelay: 1200
+- command: |
+    kubectl -n fed --context c0 exec -it pod1 -- ping -c 5 10.0.1.10
   header: |
-    clear
-    #Create federated pod
-
-  footer: |
+    #Ping from pod1 in cluster c0 tp pod1 in cluster c1
+  tmuxPane: "1"
+  clear: true
+  blockDelay: 0
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+- command: |
+    kubectl -n fed --context c1 exec -it pod1 -- ping -c 5 10.0.0.10
+  header: |
+    #Ping from pod1 in cluster c1 tp pod1 in cluster c0
+  tmuxPane: "2"
+  clear: true
+  blockDelay: 1300
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
     
 

@@ -29,11 +29,13 @@ func main() {
 }
 
 type Script struct {
-	Blocks []Block `yaml:"blocks"`
+	TMUXSession string  `yaml:"tmuxSession"`
+	Blocks      []Block `yaml:"blocks"`
 }
 
 type Block struct {
-	Text          string         `yaml:"text"`
+	Clear         bool           `yaml:"clear"`
+	Command       string         `yaml:"command"`
 	Header        string         `yaml:"header"`
 	Footer        string         `yaml:"fooder"`
 	HeaderDelay   int            `yaml:"headerDelay"`
@@ -43,6 +45,7 @@ type Block struct {
 	BlockDelay    int            `yaml:"blockDelay"`
 	WaitCondition *WaitCondition `yaml:"waitCondition"`
 	WaitCallBack  func(chan bool)
+	TMUXPane      string `yaml:"tmuxPane"`
 }
 
 type WaitCondition struct {
@@ -51,30 +54,38 @@ type WaitCondition struct {
 }
 
 func (s *Script) sender() {
+	if s.TMUXSession == "" {
+		s.TMUXSession = "0"
+	}
 	for _, block := range s.Blocks {
-		if block.Header != "" {
-			textSender(block.Header, block.CharDelay, block.HeaderDelay)
+		if block.TMUXPane == "" {
+			block.TMUXPane = "0"
 		}
-		textSender(block.Text, block.CharDelay, block.LineDelay)
+		tmuxSessionPane := fmt.Sprintf("%s.%s", s.TMUXSession, block.TMUXPane)
+		if block.Clear {
+			textSender("clear", 0, 0, tmuxSessionPane)
+		}
+		if block.Header != "" {
+			textSender(block.Header, 0, block.HeaderDelay, tmuxSessionPane)
+		}
+		textSender(block.Command, block.CharDelay, block.LineDelay, tmuxSessionPane)
 		if block.WaitCondition != nil {
 			var waitChan = make(chan bool)
 			go executeWaitCondition(block.WaitCondition, waitChan)
 			<-waitChan
 		}
-		time.Sleep(time.Duration(block.LineDelay) * time.Millisecond)
+		time.Sleep(time.Duration(block.BlockDelay) * time.Millisecond)
 		if block.Footer != "" {
-			textSender(block.Footer, block.CharDelay, block.FooterDelay)
+			textSender(block.Footer, block.CharDelay, block.FooterDelay, tmuxSessionPane)
 		}
 	}
 }
 
 func executeWaitCondition(waitCondition *WaitCondition, waitChan chan bool) {
-	fmt.Println("da")
 	var waitConditionMap = make(map[int]bool)
 	for {
 		for idx, command := range waitCondition.Commands {
-			cmdList := strings.Split(command, " ")
-			cmd := exec.Command(cmdList[0], cmdList[1:]...)
+			cmd := exec.Command("sh", "-c", command)
 			fmt.Printf("executing condition command %d %s\n", idx, command)
 			if err := cmd.Run(); err != nil {
 				fmt.Printf("command %s execution failed, waitiong %d seconds, err: %s\n", command, waitCondition.Delay, err)
@@ -98,25 +109,25 @@ func executeWaitCondition(waitCondition *WaitCondition, waitChan chan bool) {
 
 }
 
-func textSender(text string, charDelay, lineDelay int) {
+func textSender(text string, charDelay, lineDelay int, tmuxSessionPane string) {
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	for scanner.Scan() {
 		for _, r := range scanner.Text() {
-			sendRune(r)
+			sendRune(r, tmuxSessionPane)
 			time.Sleep(time.Duration(charDelay) * time.Millisecond)
 		}
 		fmt.Println(scanner.Text())
-		sendEnter()
+		sendEnter(tmuxSessionPane)
 		time.Sleep(time.Duration(lineDelay) * time.Millisecond)
 	}
 }
 
-func sendRune(r rune) {
+func sendRune(r rune, tmuxSessionPane string) {
 	sendChar := fmt.Sprintf("%c", r)
 	if sendChar == ";" {
 		sendChar = sendChar + ";"
 	}
-	cmdList := []string{"/usr/local/bin/tmux", "send-keys", "-l", "-t", "0", sendChar}
+	cmdList := []string{"tmux", "send-keys", "-l", "-t", tmuxSessionPane, sendChar}
 	cmd := exec.Command(cmdList[0], cmdList[1:]...)
 	var out bytes.Buffer
 	cmd.Stderr = &out
@@ -125,8 +136,8 @@ func sendRune(r rune) {
 	}
 }
 
-func sendEnter() {
-	cmdList := []string{"/usr/local/bin/tmux", "send-keys", "-t", "0", "ENTER"}
+func sendEnter(tmuxSessionPane string) {
+	cmdList := []string{"tmux", "send-keys", "-t", tmuxSessionPane, "ENTER"}
 	cmd := exec.Command(cmdList[0], cmdList[1:]...)
 	var out bytes.Buffer
 	cmd.Stderr = &out
