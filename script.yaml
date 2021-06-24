@@ -1,0 +1,258 @@
+blocks:
+- text: |
+    clusterNodes=(0 1)
+    memory=8g
+    cpu=4
+  blockDelay: 1300
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Set cluster count, memory and cpu
+
+- text: |
+    deployerLocation=~/deployer.yaml
+    for cluster in ${clusterNodes}; do
+      sed "/metadata:/{n;s/name: contrail-k8s-kubemanager/name: c${cluster}/;}" ${deployerLocation} > deployer_c${cluster}.yaml
+      sed -i "s/autonomousSystem: 64512/autonomousSystem: 6451${cluster}/g" deployer_c${cluster}.yaml
+      minikube start -p c${cluster} --driver hyperkit --cni ~/deployer_c${cluster}.yaml --container-runtime crio --memory ${memory} --cpus ${cpu} &
+    done
+  blockDelay: 6000
+  charDelay: 10
+  lineDelay: 1000
+  headerDelay: 1200
+  footerDelay: 1200
+  header: |
+    clear
+    #Run minikube and contrail
+
+  footer: |
+    
+    
+  waitCondition:
+    commands:
+    - minikube -p c0 status
+    - minikube -p c1 status
+    delay: 3
+- text: |
+    for cluster in ${clusterNodes}; do
+      kubectl config use-context c${cluster}
+      until kubectl -n contrail get pod contrail-control-0; do sleep 5; done
+     done
+  blockDelay: 1300
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Wait for control node to be up
+
+  footer: |
+    
+    
+  waitCondition:
+    commands:
+    - kubectl -n contrail get pods contrail-control-0 --context c0
+    - kubectl -n contrail get pods contrail-control-0 --context c1
+    delay: 3
+- text: contrail_federate create
+  blockDelay: 1300
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Federate controlplane
+    
+  footer: |
+    
+    
+  waitCondition:
+    commands:
+    - kubectl -n contrail get bgprouter c1 --context c0
+    - kubectl -n contrail get bgprouter c0 --context c0
+    delay: 3
+- text: |
+    kubectl config use-context c0
+    helm repo add kubefed-charts https://raw.githubusercontent.com/kubernetes-sigs/kubefed/master/charts
+    ver=$(helm search repo kubefed -ojson | jq ".[0].version" |tr -d "\"")
+    helm --namespace kube-federation-system upgrade -i kubefed kubefed-charts/kubefed --version=${ver} --create-namespace
+  blockDelay: 1300
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Add kubefed helm charts
+
+  footer: |
+    
+    
+  waitCondition:
+    commands:
+    - kubectl -n kube-federation-system get deployment kubefed-admission-webhook -ojson --context c0 | jq ".status.availableReplicas" | grep 1
+    - kubectl -n kube-federation-system get deployment kubefed-controller-manager -ojson --context c0 | jq ".status.availableReplicas" | grep 2
+    delay: 3
+- text: |
+    for cluster in ${clusterNodes}; do
+      kubefedctl join c${cluster} --cluster-context c${cluster} \
+      --host-cluster-context c${clusterNodes[@]:0:1} --v=2
+    done
+  blockDelay: 3000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Create federation
+
+  footer: |
+    
+    
+- text: |
+    kubefedctl enable virtualnetworks
+    kubefedctl enable subnets
+    kubefedctl enable pod
+  blockDelay: 3000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Enable federation of resources
+
+  footer: |
+    
+    
+- text: |
+    kubectl create namespace fed
+    kubefedctl federate namespace fed
+  blockDelay: 3000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Create and federate fed namespace
+
+  footer: |
+    
+
+- text: |
+    rue > subnet_ranges.yaml
+    for cluster in ${clusterNodes}; do
+      cat << EOF >> subnet_ranges.yaml
+      - ipRanges:
+        - from: 10.0.${cluster}.10
+          to: 10.0.${cluster}.255
+        key: c${cluster}-mk
+    EOF
+    done
+    
+    cat << EOF > subnet_vn.yaml
+    ---
+    apiVersion: core.contrail.juniper.net/v1alpha1
+    kind: Subnet
+    metadata:
+      name: subnet-fed
+      namespace: fed
+    spec:
+      cidr: 10.0.0.0/20
+      defaultGateway: 10.0.0.1
+      ranges:
+    $(cat subnet_ranges.yaml)
+    ---
+    apiVersion: core.contrail.juniper.net/v1alpha1
+    kind: VirtualNetwork
+    metadata:
+      name: vn-fed
+      namespace: fed
+    spec:
+      routeTargetList:
+      - target:1:1
+      v4SubnetReference:
+        apiVersion: core.contrail.juniper.net/v1alpha1
+        kind: Subnet
+        name: subnet-fed
+        namespace: fed
+    EOF
+    
+    kubectl apply -f subnet_vn.yaml
+    kubefedctl federate --namespace fed subnet subnet-fed
+    kubefedctl federate --namespace fed virtualnetwork vn-fed
+  blockDelay: 3000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Create and federated subnet and virtualNetwork
+
+  footer: |
+    
+
+  waitCondition:
+    commands:
+    - kubectl -n fed get virtualnetwork vn-fed --context c0
+    - kubectl -n fed get virtualnetwork vn-fed --context c1
+    delay: 3
+- text: |
+    true > pod_overrides.yaml
+    for cluster in ${clusterNodes}; do
+      cat << EOF >> pod_overrides.yaml
+      - clusterName: c${cluster}
+        clusterOverrides:
+        - path: "/metadata/annotations"
+          op: "replace"
+          value:
+            k8s.v1.cni.cncf.io/networks: fed/vn-fed
+    EOF
+    done
+    
+    cat << EOF > fed_pod.yaml
+    apiVersion: types.kubefed.io/v1beta1
+    kind: FederatedPod
+    metadata:
+      name: pod1
+      namespace: fed
+    spec:
+      overrides:
+    $(cat pod_overrides.yaml)
+      placement:
+        clusterSelector:
+          matchLabels: {}
+      template:
+        spec:
+          containers:
+          - command:
+            - /bin/sh
+            - -c
+            - while true; do echo hello; sleep 10;done
+            image: svl-artifactory.juniper.net/atom-docker/cn2/busybox
+            name: busy1
+            securityContext:
+              privileged: true
+          imagePullSecrets:
+          - name: svl-artifactory
+          nodeSelector:
+            node-role.kubernetes.io/master: ""
+          tolerations:
+          - effect: NoSchedule
+            operator: Exists
+          - effect: NoExecute
+            operator: Exists
+    EOF
+    
+    kubectl apply -f fed_pod.yaml
+  blockDelay: 3000
+  charDelay: 50
+  lineDelay: 1000
+  headerDelay: 1200
+  header: |
+    clear
+    #Create federated pod
+
+  footer: |
+    
+

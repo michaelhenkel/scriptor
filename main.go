@@ -4,105 +4,50 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
+
+	yaml "gopkg.in/yaml.v3"
 )
 
 func main() {
-	script := Script{
-		Blocks: []Block{{
-			BlockDelay:  1300,
-			CharDelay:   5,
-			LineDelay:   1000,
-			HeaderDelay: 1200,
-			Header:      `#Set cluster count, memory and cpu`,
-			Text: `clusterNodes=(0 1)
-memory=8g
-cpu=4
-
-`,
-		}, {BlockDelay: 1000,
-			CharDelay:    5,
-			LineDelay:    10,
-			HeaderDelay:  1200,
-			WaitCallBack: waitForMinikube,
-			Header:       `#Run minikube and contrail`,
-			Text: `deployerLocation=~/deployer.yaml
-for cluster in ${clusterNodes}; do
-  sed "/metadata:/{n;s/name: contrail-k8s-kubemanager/name: c${cluster}/;}" ${deployerLocation} > deployer_c${cluster}.yaml
-  sed -i "s/autonomousSystem: 64512/autonomousSystem: 6451${cluster}/g" deployer_c${cluster}.yaml
-  minikube start -p c${cluster} --driver hyperkit --cni ~/deployer_c${cluster}.yaml --container-runtime crio --memory ${memory} --cpus ${cpu} &
-done
-
-`,
-		}, {BlockDelay: 1000,
-			CharDelay:    5,
-			LineDelay:    10,
-			HeaderDelay:  1200,
-			WaitCallBack: waitForControlnodes,
-			Header: `
-
-#Wait for control node to be up`,
-			Text: `for cluster in ${clusterNodes}; do
-  kubectl config use-context c${cluster}
-  until kubectl -n contrail get pod contrail-control-0; do sleep 5; done
-done
-
-`,
-		}, {BlockDelay: 1000,
-			CharDelay:   5,
-			LineDelay:   10,
-			HeaderDelay: 1200,
-			Header: `
-
-#Switch to first cluster`,
-			Text: `kubectl config use-context c${clusterNodes[@]:0:1}
-
-`,
-		}, {BlockDelay: 1000,
-			CharDelay:   5,
-			LineDelay:   10,
-			HeaderDelay: 1200,
-			//WaitCallBack: waitForControlnodes,
-			Header: `
-
-#Federate controlplane`,
-			Text: `contrail_federate create
-
-`,
-		}, {BlockDelay: 1000,
-			CharDelay:   5,
-			LineDelay:   10,
-			HeaderDelay: 1200,
-			//WaitCallBack: waitForControlnodes,
-			Header: `
-
-#Add kubefed helm charts`,
-			Text: `helm repo add kubefed-charts https://raw.githubusercontent.com/kubernetes-sigs/kubefed/master/charts
-ver=$(helm search repo kubefed -ojson | jq ".[0].version" |tr -d "\"")
-helm --namespace kube-federation-system upgrade -i kubefed kubefed-charts/kubefed --version=${ver} --create-namespace
-
-`,
-		}},
+	if len(os.Args) != 2 {
+		log.Fatal("usage: ./scriptor script.yaml")
+	}
+	f, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		log.Fatal(err)
+	}
+	script := &Script{}
+	if err := yaml.Unmarshal(f, script); err != nil {
+		log.Fatal(err)
 	}
 	script.sender()
 }
 
 type Script struct {
-	Blocks []Block
+	Blocks []Block `yaml:"blocks"`
 }
 
 type Block struct {
-	Text         string
-	Header       string
-	Footer       string
-	HeaderDelay  int
-	CharDelay    int
-	LineDelay    int
-	BlockDelay   int
-	WaitCallBack func(chan bool)
+	Text          string         `yaml:"text"`
+	Header        string         `yaml:"header"`
+	Footer        string         `yaml:"fooder"`
+	HeaderDelay   int            `yaml:"headerDelay"`
+	FooterDelay   int            `yaml:"footerDelay"`
+	CharDelay     int            `yaml:"charDelay"`
+	LineDelay     int            `yaml:"lineDelay"`
+	BlockDelay    int            `yaml:"blockDelay"`
+	WaitCondition *WaitCondition `yaml:"waitCondition"`
+	WaitCallBack  func(chan bool)
+}
+
+type WaitCondition struct {
+	Commands []string `yaml:"commands"`
+	Delay    int      `yaml:"delay"`
 }
 
 func (s *Script) sender() {
@@ -111,13 +56,46 @@ func (s *Script) sender() {
 			textSender(block.Header, block.CharDelay, block.HeaderDelay)
 		}
 		textSender(block.Text, block.CharDelay, block.LineDelay)
-		if block.WaitCallBack != nil {
+		if block.WaitCondition != nil {
 			var waitChan = make(chan bool)
-			go block.WaitCallBack(waitChan)
+			go executeWaitCondition(block.WaitCondition, waitChan)
 			<-waitChan
 		}
 		time.Sleep(time.Duration(block.LineDelay) * time.Millisecond)
+		if block.Footer != "" {
+			textSender(block.Footer, block.CharDelay, block.FooterDelay)
+		}
 	}
+}
+
+func executeWaitCondition(waitCondition *WaitCondition, waitChan chan bool) {
+	fmt.Println("da")
+	var waitConditionMap = make(map[int]bool)
+	for {
+		for idx, command := range waitCondition.Commands {
+			cmdList := strings.Split(command, " ")
+			cmd := exec.Command(cmdList[0], cmdList[1:]...)
+			fmt.Printf("executing condition command %d %s\n", idx, command)
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("command %s execution failed, waitiong %d seconds, err: %s\n", command, waitCondition.Delay, err)
+				time.Sleep(time.Second * time.Duration(waitCondition.Delay))
+				continue
+			}
+			fmt.Printf("command %s executed\n", command)
+			waitConditionMap[idx] = true
+			allReady := true
+			for idx2, _ := range waitCondition.Commands {
+				if _, ok := waitConditionMap[idx2]; !ok {
+					allReady = false
+					break
+				}
+			}
+			if allReady {
+				waitChan <- true
+			}
+		}
+	}
+
 }
 
 func textSender(text string, charDelay, lineDelay int) {
@@ -154,74 +132,5 @@ func sendEnter() {
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
 		fmt.Println(err, out.String())
-	}
-}
-
-func waitForMinikube(waitChan chan bool) {
-	var minikubeRunningMap = make(map[string]bool)
-	for {
-		var out bytes.Buffer
-		minikubes := []string{"c0", "c1"}
-		for _, minikube := range minikubes {
-			cmd := exec.Command("minikube", "-p", minikube, "status")
-			cmd.Stdout = &out
-			if err := cmd.Run(); err != nil {
-				fmt.Println(err, out.String())
-			}
-			r, _ := regexp.Compile(fmt.Sprintf(`%s
-type: Control Plane
-host: Running
-kubelet: Running
-apiserver: Running
-kubeconfig: Configured`, minikube))
-			running := r.FindString(out.String())
-			if running != "" {
-				minikubeRunningMap[minikube] = true
-				allRunning := true
-				for _, mk := range minikubes {
-					if _, ok := minikubeRunningMap[mk]; !ok {
-						allRunning = false
-						break
-					}
-				}
-				if allRunning {
-					fmt.Println("all minikubes are runing")
-					waitChan <- true
-				}
-			}
-			fmt.Printf("minikube %s not running, waiting\n", minikube)
-			time.Sleep(2 * time.Second)
-		}
-	}
-}
-
-func waitForControlnodes(waitChan chan bool) {
-	var minikubeRunningMap = make(map[string]bool)
-	for {
-		var out bytes.Buffer
-		minikubes := []string{"c0", "c1"}
-		for _, minikube := range minikubes {
-			cmd := exec.Command("kubectl", "-n", "contrail", "get", "pods", "contrail-control-0", "--context", minikube)
-			cmd.Stdout = &out
-			if err := cmd.Run(); err != nil {
-				fmt.Println(err, out.String())
-				fmt.Printf("control-nodes on %s not running, waiting\n", minikube)
-				time.Sleep(2 * time.Second)
-			} else {
-				minikubeRunningMap[minikube] = true
-				allRunning := true
-				for _, mk := range minikubes {
-					if _, ok := minikubeRunningMap[mk]; !ok {
-						allRunning = false
-						break
-					}
-				}
-				if allRunning {
-					fmt.Println("all minikubes are runing")
-					waitChan <- true
-				}
-			}
-
-		}
 	}
 }
